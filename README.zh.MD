@@ -1,27 +1,27 @@
 # K8s tool
 
-k8s install from kubeadm
+k8s 安装部署自动化处理（kubeadm）
 
-## usage
+## 使用说明
 
-unzip resource.zip to resource directory
-example: ubuntu 22.04 64bit offline resource
+需要解压资源文件到当前路径
+示例为 ubuntu 22.04 离线资源
 
 ```bash
 unzip resource.zip
 ```
 
-install
+安装集群
 
 ```bash
-k8s-tools help
-k8s-tools install
-k8s-tools install --config config.yaml  # default config file path
-k8s-tools install --config config.yaml --steps  # print install steps
-k8s-tools install --config config.yaml --step 3,4  # only execute 3,4 steps, refer to above print (1 must be executed, other operations must be executed first)
+k8s-tools help # 帮助
+k8s-tools install # 安装
+k8s-tools install --config config.yaml  # 默认配置文件路径
+k8s-tools install --config config.yaml --steps  # 打印安装步骤
+k8s-tools install --config config.yaml --step 3,4 # 只执行3,4步骤, 参考上面的打印（1一定执行，其他操作都必须先连接）
 ```
 
-## deploy
+## 编译
 
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/k8s-tool-linux .
@@ -29,11 +29,11 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o build/k8s-tool-darwin .
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o build/k8s-tool.exe .
 ```
 
-## config file
+## 配置文件
 
 ```yaml
-# config file
-# config path: config/config.yaml
+# 配置文件
+# 配置文件路径： config/config.yaml
 namespace: default
 registry: registry.cn-hangzhou.aliyuncs.com
 
