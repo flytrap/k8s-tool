@@ -60,6 +60,7 @@ type nodeConfig struct {
 type Config struct {
 	Namespace string        `yaml:"namespace" json:"namespace"`
 	Registry  string        `yaml:"registry" json:"registry"`
+	CRISocket string        `yaml:"cri-socket" json:"cri-socket"`
 	Vip       string        `yaml:"vip" json:"vip"`
 	NTP       ntpConfig     `yaml:"ntp" json:"ntp"`
 	NFS       nfsConfig     `yaml:"nfs" json:"nfs"`

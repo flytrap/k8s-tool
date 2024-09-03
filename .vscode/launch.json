@@ -13,11 +13,12 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "install",
+                "--update",
                 "--config",
                 "${workspaceFolder}/config/config.yml",
-                // "--step",
+                "--step",
                 // // "6,10"
-                // "13"
+                "1,2,3,9"
             ]
         }
     ]

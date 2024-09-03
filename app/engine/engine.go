@@ -15,6 +15,7 @@ import (
 
 type Engine struct {
 	namespace string
+	CRISocket string
 	vip       string
 	ntp       struct {
 		server   string
@@ -129,9 +130,25 @@ func (e *Engine) Install(steps string) error {
 	return nil
 }
 
-func (e *Engine) Update() error {
+func (e *Engine) Update(steps string) error {
 	if err := e.check(); err != nil {
 		return err
+	}
+	if len(steps) > 0 {
+		li := strings.Split(steps, ",")
+		if li[0] != "1" {
+			li = append([]string{"1"}, li...)
+		}
+		for _, i := range li {
+			n, err := strconv.Atoi(i)
+			if err != nil {
+				continue
+			}
+			if err := UpdateSteps[n-1].install(e); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	for _, step := range UpdateSteps {
 		if err := step.install(e); err != nil {
@@ -152,7 +169,7 @@ func (e *Engine) checkNew() error {
 	}
 	for i := range e.nodes {
 		n := e.nodes[i]
-		if _, ok := nodeMap[n.GetHostname()]; !ok {
+		if _, ok := nodeMap[n.GetHostname()]; ok {
 			n.SetIsNew(false)
 		}
 	}
@@ -450,18 +467,18 @@ func (e *Engine) join() error {
 			if n.IsControl() {
 				_, err = n.Run("", string(mj))
 				if err != nil {
-					e.master.Run("", "kubeadm init phase upload-certs --upload-certs")
+					e.master.Run("", "sudo kubeadm init phase upload-certs --upload-certs")
 					mj, err = e.master.Run("", "sudo kubeadm token create --print-join-command --certificate-key $(kubeadm certs certificate-key)")
 					if err != nil {
 						return err
 					}
-					_, err = n.Run("", string(mj))
+					_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(mj)), e.CRISocket}, " "))
 				}
 			} else {
-				_, err = n.Run("", string(nj))
+				_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(nj)), e.CRISocket}, " "))
 			}
 			return err
 		})
 	}
-	return nil
+	return eg.Wait()
 }

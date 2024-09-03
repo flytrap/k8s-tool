@@ -68,6 +68,7 @@ func install(ctx *cli.Context) error {
 
 	e, err := engine.New(
 		engine.Namespace(c.Namespace),
+		engine.CRISocket(c.CRISocket),
 		engine.Registry(c.Registry),
 		engine.Vip(c.Vip),
 		engine.NTP(c.NTP.Server, c.NTP.Allow, c.NTP.Timezone),
@@ -93,7 +94,7 @@ func install(ctx *cli.Context) error {
 		}
 	}
 	if ctx.Bool("update") {
-		return e.Update()
+		return e.Update(ctx.String("step"))
 	}
 	return e.Install(ctx.String("step"))
 }

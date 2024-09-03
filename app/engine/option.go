@@ -9,6 +9,13 @@ func Namespace(namespace string) Option {
 	}
 }
 
+func CRISocket(cRISocket string) Option {
+	return func(e *Engine) error {
+		e.CRISocket = cRISocket
+		return nil
+	}
+}
+
 func Vip(vip string) Option {
 	return func(e *Engine) error {
 		e.vip = vip
