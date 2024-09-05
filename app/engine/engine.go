@@ -465,17 +465,17 @@ func (e *Engine) join() error {
 				return err
 			}
 			if n.IsControl() {
-				_, err = n.Run("", string(mj))
+				_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(mj)), "--cri-socket=" + e.CRISocket}, " "))
 				if err != nil {
 					e.master.Run("", "sudo kubeadm init phase upload-certs --upload-certs")
 					mj, err = e.master.Run("", "sudo kubeadm token create --print-join-command --certificate-key $(kubeadm certs certificate-key)")
 					if err != nil {
 						return err
 					}
-					_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(mj)), e.CRISocket}, " "))
+					_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(mj)), "--cri-socket=" + e.CRISocket}, " "))
 				}
 			} else {
-				_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(nj)), e.CRISocket}, " "))
+				_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(nj)), "--cri-socket=" + e.CRISocket}, " "))
 			}
 			return err
 		})
