@@ -78,19 +78,19 @@ func install(ctx *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	for i := range c.Nodes {
+	for _, nn := range c.Nodes {
 		n, err := node.New(
-			node.Address(c.Nodes[i].Address),
-			node.Role(c.Nodes[i].Role),
-			node.Port(c.Nodes[i].Port),
-			node.Username(c.Nodes[i].Username),
-			node.Password(c.Nodes[i].Password),
-			node.KeyPath(c.Nodes[i].KeyPath),
+			node.Address(nn.Address),
+			node.Role(nn.Role),
+			node.Port(nn.Port),
+			node.Username(nn.Username),
+			node.Password(nn.Password),
+			node.KeyPath(nn.KeyPath),
 		)
-		n.SetHostname(c.Nodes[i].Hostname)
 		if err != nil {
 			return err
 		}
+		n.SetHostname(nn.Hostname)
 		if err := e.AddNode(n); err != nil {
 			return err
 		}
