@@ -55,6 +55,7 @@ type nodeConfig struct {
 	Port     uint16   `yaml:"port" json:"port"`
 	Username string   `yaml:"username" json:"username"`
 	Password string   `yaml:"password" json:"password"`
+	KeyPath  string   `yaml:"keyPath" json:"keyPath"`
 }
 
 type Config struct {

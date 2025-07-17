@@ -14,6 +14,7 @@ type base struct {
 	username  string
 	password  string
 	hostname  string
+	keyPath   string
 }
 
 func (b *base) GetAddress() string {
@@ -56,6 +57,10 @@ func (b *base) GetUsername() string {
 
 func (b *base) GetPassword() string {
 	return base64.StdEncoding.EncodeToString([]byte(b.password))
+}
+
+func (b *base) GetKeyPath() string {
+	return b.keyPath
 }
 
 func (b *base) GetHostname() string {

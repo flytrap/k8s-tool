@@ -67,3 +67,10 @@ func Password(password string) Option {
 		return nil
 	}
 }
+
+func KeyPath(keyPath string) Option {
+	return func(n *node) error {
+		n.keyPath = keyPath
+		return nil
+	}
+}

@@ -62,6 +62,7 @@ func newWebCmd(ctx context.Context) *cli.Command {
 func install(ctx *cli.Context) error {
 	if ctx.Bool("steps") {
 		printSteps()
+		return nil
 	}
 	config.MustLoad(ctx.String("config"))
 	c := config.C
@@ -84,6 +85,7 @@ func install(ctx *cli.Context) error {
 			node.Port(c.Nodes[i].Port),
 			node.Username(c.Nodes[i].Username),
 			node.Password(c.Nodes[i].Password),
+			node.KeyPath(c.Nodes[i].KeyPath),
 		)
 		n.SetHostname(c.Nodes[i].Hostname)
 		if err != nil {

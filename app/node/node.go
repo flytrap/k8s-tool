@@ -80,9 +80,22 @@ func New(opts ...Option) (Node, error) {
 
 func (n *node) Connect() error {
 	addr := fmt.Sprintf("%s:%d", n.addr, n.port)
+	auth := []ssh.AuthMethod{ssh.Password(n.password)}
+	if n.keyPath != "" {
+		key, err := os.ReadFile(n.keyPath)
+		if err != nil {
+			return fmt.Errorf("read key file %q: %w", n.keyPath, err)
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return fmt.Errorf("parse private key %q: %w", n.keyPath, err)
+		}
+		auth = []ssh.AuthMethod{ssh.PublicKeys(signer)}
+	}
+
 	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
 		User:            n.username,
-		Auth:            []ssh.AuthMethod{ssh.Password(n.password)},
+		Auth:            auth,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	})
 	if err != nil {
