@@ -303,6 +303,12 @@ func (e *Engine) installHa() error {
 
 func (e *Engine) installKeepalived() error {
 	var eg errgroup.Group
+	var masterIps []string
+	for _, n := range e.nodes {
+		if n.IsControl() {
+			masterIps = append(masterIps, n.GetAddress())
+		}
+	}
 	for i := range e.nodes {
 		n := e.nodes[i]
 		if !n.IsETCD() {
@@ -312,8 +318,14 @@ func (e *Engine) installKeepalived() error {
 		if n == e.master {
 			state = "MASTER"
 		}
+		var ips = []string{}
+		for _, ip := range masterIps {
+			if ip != n.GetAddress() {
+				ips = append(ips, ip)
+			}
+		}
 		eg.Go(func() error {
-			err := n.Install("keepalived", e.vip, state, n.GetAddress())
+			err := n.Install("keepalived", e.vip, state, n.GetAddress(), strings.Join(ips, ","))
 			if err != nil {
 				return err
 			}
