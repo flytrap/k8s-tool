@@ -51,6 +51,7 @@ nodes:
     port: 22
     username: ZGVwbG95
     password: ZGVwbG95
+    keyPath:
   # - address: 192.168.56.102
   #   hostname: master2
   #   role: [etcd, controlplane, worker]
