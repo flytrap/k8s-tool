@@ -346,7 +346,9 @@ func (e *Engine) startK8s() error {
 	r := regexp.MustCompile("(kubeadm join.*?\n.*?\n.*?)\n")
 	js := r.FindAll(res, -1)
 	e.master.Run(filepath.Join("resource", "kubeadm"), fmt.Sprint("bash", " ", "config.sh"))
+	// 兼容不同版本的污点键：同时去除 master 与 control-plane 污点
 	e.master.Run("", fmt.Sprint("kubectl taint node ", e.master.GetHostname(), " node-role.kubernetes.io/master-"))
+	e.master.Run("", fmt.Sprint("kubectl taint node ", e.master.GetHostname(), " node-role.kubernetes.io/control-plane-"))
 	li := strings.Split(string(js[0]), "\\\n")
 	nj := fmt.Sprintf("sudo %s %s", li[0], li[1])
 	mj := fmt.Sprintf("sudo %s %s %s", li[0], li[1], li[2])
@@ -365,7 +367,9 @@ func (e *Engine) startK8s() error {
 					return err
 				}
 				n.Run(filepath.Join("resource", "kubeadm"), fmt.Sprint("bash", " ", "config.sh"))
-				n.Run("", fmt.Sprint("kubectl taint ", n.GetHostname(), " node-role.kubernetes.io/control-plane-"))
+				// 修正缺少的 "node" 关键字，并同时去除两种污点键
+				n.Run("", fmt.Sprint("kubectl taint node ", n.GetHostname(), " node-role.kubernetes.io/control-plane-"))
+				n.Run("", fmt.Sprint("kubectl taint node ", n.GetHostname(), " node-role.kubernetes.io/master-"))
 			} else {
 				_, err = n.Run("", nj)
 			}
@@ -451,14 +455,24 @@ func (e *Engine) installApp() error {
 }
 
 func (e *Engine) join() error {
-	mj, err := e.master.Run("", "sudo kubeadm token create --print-join-command --certificate-key $(kubeadm certs certificate-key)")
+	// 1) 预先上传证书（一次即可），确保 control-plane 可用的证书密钥
+	if _, err := e.master.Run("", "sudo kubeadm init phase upload-certs --upload-certs"); err != nil {
+		return err
+	}
+
+	// 2) 获取基础 join 命令（worker 用）
+	baseJoinBytes, err := e.master.Run("", "sudo kubeadm token create --print-join-command")
 	if err != nil {
 		return err
 	}
-	nj, err := e.master.Run("", "sudo kubeadm token create --print-join-command")
+	baseJoin := strings.TrimSpace(string(baseJoinBytes))
+
+	// 3) 获取 control-plane 证书密钥
+	certKeyBytes, err := e.master.Run("", "sudo kubeadm certs certificate-key")
 	if err != nil {
 		return err
 	}
+	certKey := strings.TrimSpace(string(certKeyBytes))
 
 	var eg errgroup.Group
 	for i := range e.nodes {
@@ -476,19 +490,27 @@ func (e *Engine) join() error {
 			if err := n.Install("app/images"); err != nil {
 				return err
 			}
+
+			var cmd string
 			if n.IsControl() {
-				_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(mj)), "--cri-socket=" + e.CRISocket}, " "))
-				if err != nil {
-					e.master.Run("", "sudo kubeadm init phase upload-certs --upload-certs")
-					mj, err = e.master.Run("", "sudo kubeadm token create --print-join-command --certificate-key $(kubeadm certs certificate-key)")
-					if err != nil {
-						return err
-					}
-					_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(mj)), "--cri-socket=" + e.CRISocket}, " "))
-				}
+				// control-plane 需要在基础命令后追加 --control-plane 与 --certificate-key
+				cmd = strings.Join([]string{
+					"sudo",
+					baseJoin,
+					"--control-plane",
+					"--certificate-key",
+					certKey,
+					"--cri-socket=" + e.CRISocket,
+				}, " ")
 			} else {
-				_, err = n.Run("", strings.Join([]string{"sudo", strings.TrimSpace(string(nj)), "--cri-socket=" + e.CRISocket}, " "))
+				cmd = strings.Join([]string{
+					"sudo",
+					baseJoin,
+					"--cri-socket=" + e.CRISocket,
+				}, " ")
 			}
+
+			_, err = n.Run("", cmd)
 			return err
 		})
 	}
