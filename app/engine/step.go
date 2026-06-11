@@ -33,7 +33,7 @@ func (s *Step) install(e *Engine, n ...int) error {
 
 	n = append(n, s.Num)
 	for i := range s.Steps {
-		if err := s.Steps[i+1].install(e, n...); err != nil {
+		if err := s.Steps[i].install(e, n...); err != nil {
 			return err
 		}
 	}

@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"k8s-tool/app/node"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
+
+const nodeJoinTimeout = 5 * time.Minute
 
 type Engine struct {
 	namespace string
@@ -52,8 +54,10 @@ func (e *Engine) AddNode(n node.Node) error {
 		}
 	}
 
-	if e.master == nil && n.IsControl() {
-		e.master = n
+	if n.IsControl() {
+		if e.master == nil {
+			e.master = n
+		}
 	}
 	e.nodes = append(e.nodes, n)
 	return nil
@@ -105,16 +109,14 @@ func (e *Engine) Install(steps string) error {
 	if err := e.check(); err != nil {
 		return err
 	}
+	defer e.closeAll()
 	if len(steps) > 0 {
-		li := strings.Split(steps, ",")
-		if li[0] != "1" {
-			li = append([]string{"1"}, li...)
+		nums, err := parseStepNums(steps, len(DeploySteps))
+		if err != nil {
+			return err
 		}
-		for _, i := range li {
-			n, err := strconv.Atoi(i)
-			if err != nil {
-				continue
-			}
+		nums = prependMissingSteps(nums, 1)
+		for _, n := range nums {
 			if err := DeploySteps[n-1].install(e); err != nil {
 				return err
 			}
@@ -134,16 +136,21 @@ func (e *Engine) Update(steps string) error {
 	if err := e.check(); err != nil {
 		return err
 	}
+	defer e.closeAll()
 	if len(steps) > 0 {
-		li := strings.Split(steps, ",")
-		if li[0] != "1" {
-			li = append([]string{"1"}, li...)
+		nums, err := parseStepNums(steps, len(UpdateSteps))
+		if err != nil {
+			return err
 		}
-		for _, i := range li {
-			n, err := strconv.Atoi(i)
-			if err != nil {
-				continue
+		required := []int{1}
+		for _, n := range nums {
+			if n > 2 {
+				required = append(required, 2)
+				break
 			}
+		}
+		nums = prependMissingSteps(nums, required...)
+		for _, n := range nums {
 			if err := UpdateSteps[n-1].install(e); err != nil {
 				return err
 			}
@@ -158,14 +165,61 @@ func (e *Engine) Update(steps string) error {
 	return nil
 }
 
+func parseStepNums(raw string, max int) ([]int, error) {
+	var nums []int
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		n, err := strconv.Atoi(item)
+		if err != nil {
+			return nil, fmt.Errorf("invalid step %q: %w", item, err)
+		}
+		if n < 1 || n > max {
+			return nil, fmt.Errorf("invalid step %d: valid range is 1-%d", n, max)
+		}
+		nums = append(nums, n)
+	}
+	return nums, nil
+}
+
+func prependMissingSteps(nums []int, required ...int) []int {
+	added := make(map[int]struct{}, len(nums)+len(required))
+	out := make([]int, 0, len(nums)+len(required))
+	for _, n := range required {
+		if _, ok := added[n]; ok {
+			continue
+		}
+		out = append(out, n)
+		added[n] = struct{}{}
+	}
+	for _, n := range nums {
+		if _, ok := added[n]; ok {
+			continue
+		}
+		out = append(out, n)
+		added[n] = struct{}{}
+	}
+	return out
+}
+
+func (e *Engine) closeAll() {
+	for _, n := range e.nodes {
+		if closer, ok := n.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+}
+
 func (e *Engine) checkNew() error {
-	res, err := e.master.Run("", "kubectl get nodes|awk '{print $1}'")
+	res, err := e.master.Run("", "kubectl get nodes -o jsonpath='{.items[*].metadata.name}'")
 	if err != nil {
 		return err
 	}
-	nodeMap := map[string]string{}
-	for _, n := range strings.Split(string(res), "\n") {
-		nodeMap[n] = n
+	nodeMap := map[string]struct{}{}
+	for _, n := range strings.Fields(string(res)) {
+		nodeMap[n] = struct{}{}
 	}
 	for i := range e.nodes {
 		n := e.nodes[i]
@@ -325,8 +379,7 @@ func (e *Engine) installKeepalived() error {
 			}
 		}
 		eg.Go(func() error {
-			err := n.Install("keepalived", e.vip, state, n.GetAddress(), strings.Join(ips, ","))
-			if err != nil {
+			if err := n.Install("keepalived", e.vip, state, n.GetAddress(), strings.Join(ips, ",")); err != nil {
 				return err
 			}
 			if n != e.master {
@@ -338,60 +391,169 @@ func (e *Engine) installKeepalived() error {
 	return eg.Wait()
 }
 func (e *Engine) startK8s() error {
-	res, err := e.master.Run(filepath.Join("resource", "kubeadm"), fmt.Sprint("bash", " ", "start.sh", " ", e.vip, " ", e.master.GetHostname(), " ", e.master.GetAddress()))
+	res, err := e.master.Run(filepath.Join("resource", "kubeadm"),
+		fmt.Sprintf("bash start.sh %s %s %s", e.vip, e.master.GetHostname(), e.master.GetAddress()))
 	if err != nil {
 		return err
 	}
 	logrus.Info(res)
-	r := regexp.MustCompile("(kubeadm join.*?\n.*?\n.*?)\n")
-	js := r.FindAll(res, -1)
-	e.master.Run(filepath.Join("resource", "kubeadm"), fmt.Sprint("bash", " ", "config.sh"))
-	// 兼容不同版本的污点键：同时去除 master 与 control-plane 污点
-	e.master.Run("", fmt.Sprint("kubectl taint node ", e.master.GetHostname(), " node-role.kubernetes.io/master-"))
-	e.master.Run("", fmt.Sprint("kubectl taint node ", e.master.GetHostname(), " node-role.kubernetes.io/control-plane-"))
-	li := strings.Split(string(js[0]), "\\\n")
-	nj := fmt.Sprintf("sudo %s %s", li[0], li[1])
-	mj := fmt.Sprintf("sudo %s %s %s", li[0], li[1], li[2])
-	logrus.Info(mj)
-	logrus.Info(nj)
+
+	if err := e.configureKubectl(e.master); err != nil {
+		return err
+	}
+	if err := e.waitForNodeRegistered(e.master); err != nil {
+		return err
+	}
+	if err := e.removeControlPlaneTaints(e.master.GetHostname()); err != nil {
+		return err
+	}
+
+	return e.joinNodes()
+}
+
+func (e *Engine) configureKubectl(n node.Node) error {
+	if _, err := n.Run(filepath.Join("resource", "kubeadm"), "bash config.sh"); err != nil {
+		return fmt.Errorf("%s: configure kubectl: %w", n.GetHostname(), err)
+	}
+	return nil
+}
+
+func (e *Engine) removeControlPlaneTaints(hostname string) error {
+	for _, key := range []string{
+		"node-role.kubernetes.io/master",
+		"node-role.kubernetes.io/control-plane",
+	} {
+		cmd := fmt.Sprintf("kubectl taint node %s %s- 2>&1", shellQuote(hostname), shellQuote(key))
+		out, err := e.master.Run("", cmd)
+		if err == nil {
+			continue
+		}
+
+		msg := strings.ToLower(string(out))
+		if strings.Contains(msg, "taint") && strings.Contains(msg, "not found") {
+			continue
+		}
+		return fmt.Errorf("%s: remove taint %s: %w", hostname, key, err)
+	}
+	return nil
+}
+
+func (e *Engine) waitForNodeRegistered(n node.Node) error {
+	hostname := n.GetHostname()
+	deadline := time.Now().Add(nodeJoinTimeout)
+	var lastErr error
+
+	for {
+		_, err := e.master.Run("", fmt.Sprintf("kubectl get node %s", shellQuote(hostname)))
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s: node was not registered in Kubernetes within %s: %w", hostname, nodeJoinTimeout, lastErr)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func (e *Engine) kubeadmJoinCommand(baseJoin string, controlPlane bool, certKey string) string {
+	parts := []string{"sudo", baseJoin}
+	if controlPlane {
+		parts = append(parts, "--control-plane", "--certificate-key", certKey)
+	}
+	criSocket := strings.TrimSpace(e.CRISocket)
+	if criSocket != "" {
+		parts = append(parts, shellQuote("--cri-socket="+criSocket))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func (e *Engine) joinNodes() error {
+	certKeyBytes, err := e.master.Run("", "sudo kubeadm certs certificate-key")
+	if err != nil {
+		return err
+	}
+	certKey := strings.TrimSpace(string(certKeyBytes))
+
+	if _, err := e.master.Run("", fmt.Sprintf("sudo kubeadm init phase upload-certs --upload-certs --certificate-key=%s", certKey)); err != nil {
+		return err
+	}
+
+	baseJoinBytes, err := e.master.Run("", "sudo kubeadm token create --print-join-command")
+	if err != nil {
+		return err
+	}
+	baseJoin := strings.TrimSpace(string(baseJoinBytes))
+
+	// control-plane 逐个串行 join，etcd 成员变更不允许并发
+	for i := range e.nodes {
+		n := e.nodes[i]
+		if n == e.master || !n.IsNew() || !n.IsControl() {
+			continue
+		}
+		cmd := e.kubeadmJoinCommand(baseJoin, true, certKey)
+		if _, err := n.Run("", cmd); err != nil {
+			return err
+		}
+		if err := e.waitForNodeRegistered(n); err != nil {
+			return err
+		}
+		if err := e.configureKubectl(n); err != nil {
+			return err
+		}
+		if err := e.removeControlPlaneTaints(n.GetHostname()); err != nil {
+			return err
+		}
+	}
+
+	// worker 并行 join
 	var eg errgroup.Group
 	for i := range e.nodes {
 		n := e.nodes[i]
-		if n == e.master {
+		if n == e.master || !n.IsNew() || !n.IsWorker() || n.IsControl() {
 			continue
 		}
 		eg.Go(func() error {
-			if n.IsControl() {
-				_, err = n.Run("", mj)
-				if err != nil {
-					return err
-				}
-				n.Run(filepath.Join("resource", "kubeadm"), fmt.Sprint("bash", " ", "config.sh"))
-				// 修正缺少的 "node" 关键字，并同时去除两种污点键
-				n.Run("", fmt.Sprint("kubectl taint node ", n.GetHostname(), " node-role.kubernetes.io/control-plane-"))
-				n.Run("", fmt.Sprint("kubectl taint node ", n.GetHostname(), " node-role.kubernetes.io/master-"))
-			} else {
-				_, err = n.Run("", nj)
-			}
+			cmd := e.kubeadmJoinCommand(baseJoin, false, "")
+			_, err := n.Run("", cmd)
 			return err
 		})
 	}
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+
+	for i := range e.nodes {
+		n := e.nodes[i]
+		if n == e.master || !n.IsNew() || !n.IsWorker() || n.IsControl() {
+			continue
+		}
+		if err := e.waitForNodeRegistered(n); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *Engine) installCalico() error {
 	var eg errgroup.Group
 	for i := range e.nodes {
 		n := e.nodes[i]
+		if !n.IsNew() {
+			continue
+		}
 		eg.Go(func() error {
 			return n.Install("calico")
 		})
 	}
-	err := eg.Wait()
-	if err != nil {
+	if err := eg.Wait(); err != nil {
 		return err
 	}
-	_, err = e.master.Run(filepath.Join("resource", "calico"), "kubectl apply -f calico.yaml")
+	_, err := e.master.Run(filepath.Join("resource", "calico"), "kubectl apply -f calico.yaml")
 	return err
 }
 
@@ -425,15 +587,17 @@ func (e *Engine) installNFS() error {
 }
 
 func (e *Engine) installIstio() error {
-	eg := errgroup.Group{}
+	var eg errgroup.Group
 	for i := range e.nodes {
 		n := e.nodes[i]
+		if !n.IsNew() {
+			continue
+		}
 		eg.Go(func() error {
-			return n.Install("istio/images") // 加载镜像
+			return n.Install("istio/images")
 		})
 	}
-	err := eg.Wait()
-	if err != nil {
+	if err := eg.Wait(); err != nil {
 		return err
 	}
 	return e.master.Install("istio")
@@ -443,6 +607,9 @@ func (e *Engine) installApp() error {
 	var eg errgroup.Group
 	for i := range e.nodes {
 		n := e.nodes[i]
+		if !n.IsNew() {
+			continue
+		}
 		eg.Go(func() error {
 			return n.Install("app/images")
 		})
@@ -450,30 +617,28 @@ func (e *Engine) installApp() error {
 	if err := eg.Wait(); err != nil {
 		return err
 	}
-	e.master.Install("app")
-	return nil
+	if err := e.master.Install("app"); err != nil {
+		return err
+	}
+	return e.startKeepalivedBackups()
+}
+
+func (e *Engine) startKeepalivedBackups() error {
+	var eg errgroup.Group
+	for i := range e.nodes {
+		n := e.nodes[i]
+		if n == e.master || !n.IsETCD() {
+			continue
+		}
+		eg.Go(func() error {
+			return n.StartService("keepalived")
+		})
+	}
+	return eg.Wait()
 }
 
 func (e *Engine) join() error {
-	// 1) 预先上传证书（一次即可），确保 control-plane 可用的证书密钥
-	if _, err := e.master.Run("", "sudo kubeadm init phase upload-certs --upload-certs"); err != nil {
-		return err
-	}
-
-	// 2) 获取基础 join 命令（worker 用）
-	baseJoinBytes, err := e.master.Run("", "sudo kubeadm token create --print-join-command")
-	if err != nil {
-		return err
-	}
-	baseJoin := strings.TrimSpace(string(baseJoinBytes))
-
-	// 3) 获取 control-plane 证书密钥
-	certKeyBytes, err := e.master.Run("", "sudo kubeadm certs certificate-key")
-	if err != nil {
-		return err
-	}
-	certKey := strings.TrimSpace(string(certKeyBytes))
-
+	// 新节点先并行加载镜像
 	var eg errgroup.Group
 	for i := range e.nodes {
 		n := e.nodes[i]
@@ -487,32 +652,12 @@ func (e *Engine) join() error {
 			if err := n.Install("istio/images"); err != nil {
 				return err
 			}
-			if err := n.Install("app/images"); err != nil {
-				return err
-			}
-
-			var cmd string
-			if n.IsControl() {
-				// control-plane 需要在基础命令后追加 --control-plane 与 --certificate-key
-				cmd = strings.Join([]string{
-					"sudo",
-					baseJoin,
-					"--control-plane",
-					"--certificate-key",
-					certKey,
-					"--cri-socket=" + e.CRISocket,
-				}, " ")
-			} else {
-				cmd = strings.Join([]string{
-					"sudo",
-					baseJoin,
-					"--cri-socket=" + e.CRISocket,
-				}, " ")
-			}
-
-			_, err = n.Run("", cmd)
-			return err
+			return n.Install("app/images")
 		})
 	}
-	return eg.Wait()
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+
+	return e.joinNodes()
 }

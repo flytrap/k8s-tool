@@ -27,3 +27,5 @@ go.work.sum
 resource.zip
 resource.tar.gz
 .DS_Store
+.claude/
+_bmad/

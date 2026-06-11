@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,7 +153,7 @@ func (n *node) fetchOS() error {
 	default:
 		return fmt.Errorf("unsupported operation system %q", os)
 	}
-	log.Printf("Node %s os: %s\n", n.addr, n.os)
+	logrus.Infof("Node %s os: %s", n.addr, n.os)
 	return nil
 }
 
@@ -171,7 +170,7 @@ func (n *node) fetchArch() error {
 	default:
 		return fmt.Errorf("unsupported machine architecture: %q", arch)
 	}
-	log.Printf("Node %s arch: %s\n", n.addr, n.arch)
+	logrus.Infof("Node %s arch: %s", n.addr, n.arch)
 	return nil
 }
 
@@ -182,19 +181,21 @@ func (n *node) fetchHome() error {
 	}
 
 	n.home = home
-	log.Printf("Node %s home: %s\n", n.addr, n.home)
+	logrus.Infof("Node %s home: %s", n.addr, n.home)
 	return nil
 }
 
 func (n *node) AddHost(addr, name string) error {
-	cmd := fmt.Sprintf("sudo sed -i '$a %s  %s' /etc/hosts", addr, name)
+	cmd := fmt.Sprintf(
+		"grep -q '%s' /etc/hosts || sudo sed -i '$a %s  %s' /etc/hosts",
+		shellEscape(name), shellEscape(addr), shellEscape(name))
 	info, err := n.Run("", cmd)
 	logrus.Info(string(info))
 	return err
 }
 
 func (n *node) RemoveHost(name string) error {
-	cmd := fmt.Sprintf("sudo sed -ie '/%s/d' /etc/hosts", name)
+	cmd := fmt.Sprintf("sudo sed -ie '/%s/d' /etc/hosts", shellEscape(name))
 	info, err := n.Run("", cmd)
 	logrus.Info(string(info))
 	return err
@@ -202,10 +203,15 @@ func (n *node) RemoveHost(name string) error {
 
 func (n *node) ReplaceHost(addr, name string) error {
 	cmd := fmt.Sprintf("sudo sed -ie '/%s/d' /etc/hosts && "+
-		"sudo sed -i '$a %s  %s' /etc/hosts", name, addr, name)
+		"sudo sed -i '$a %s  %s' /etc/hosts",
+		shellEscape(name), shellEscape(addr), shellEscape(name))
 	info, err := n.Run("", cmd)
 	logrus.Info(string(info))
 	return err
+}
+
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func (n *node) copyFile(srcPath, dstPath string) error {
@@ -280,7 +286,7 @@ func (n *node) copyDir(srcDir, dstDir string) error {
 			}
 			name = ""
 		}
-		dstPath := filepath.Join(srcDir, name)
+		dstPath := filepath.Join(dstDir, name)
 		if fi.IsDir() {
 			if err := n.copyDir(srcPath, dstPath); err != nil {
 				return err
@@ -310,7 +316,7 @@ func (n *node) Run(cwd string, cmds ...string) ([]byte, error) {
 	s.Stdout = &b
 	s.Stderr = n.stderr
 	if err := s.Run(cmd); err != nil {
-		return nil, err
+		return b.Bytes(), err
 	}
 	return b.Bytes(), nil
 }
@@ -342,8 +348,8 @@ func (n *node) Install(name string, a ...string) error {
 	}
 
 	info, err := n.Run(dstDir,
-		fmt.Sprint("chmod", " ", "+x", " ", "install.sh", " "),
-		fmt.Sprint("bash", " ", "install.sh", " ", strings.Join(a, " ")),
+		"chmod +x install.sh",
+		fmt.Sprintf("bash install.sh %s", strings.Join(a, " ")),
 	)
 	logrus.Info(string(info))
 	return err
