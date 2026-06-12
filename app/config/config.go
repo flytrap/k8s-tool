@@ -38,32 +38,32 @@ func PrintWithJSON() {
 }
 
 type ntpConfig struct {
-	Server   string `yaml:"server" json:"server"`
-	Allow    string `yaml:"allow" json:"allow"`
-	Timezone string `yaml:"timezone" json:"timezone"`
+	Server   string `mapstructure:"server" yaml:"server" json:"server"`
+	Allow    string `mapstructure:"allow" yaml:"allow" json:"allow"`
+	Timezone string `mapstructure:"timezone" yaml:"timezone" json:"timezone"`
 }
 
 type nfsConfig struct {
-	Server string `yaml:"server" json:"server"`
-	Path   string `yaml:"path" json:"path"`
+	Server string `mapstructure:"server" yaml:"server" json:"server"`
+	Path   string `mapstructure:"path" yaml:"path" json:"path"`
 }
 
 type nodeConfig struct {
-	Address  string   `yaml:"address" json:"address"`
-	Hostname string   `yaml:"hostname" json:"hostname"`
-	Role     []string `yaml:"role" json:"role"`
-	Port     uint16   `yaml:"port" json:"port"`
-	Username string   `yaml:"username" json:"username"`
-	Password string   `yaml:"password" json:"password"`
-	KeyPath  string   `yaml:"keyPath" json:"keyPath"`
+	Address  string   `mapstructure:"address" yaml:"address" json:"address"`
+	Hostname string   `mapstructure:"hostname" yaml:"hostname" json:"hostname"`
+	Role     []string `mapstructure:"role" yaml:"role" json:"role"`
+	Port     uint16   `mapstructure:"port" yaml:"port" json:"port"`
+	Username string   `mapstructure:"username" yaml:"username" json:"username"`
+	Password string   `mapstructure:"password" yaml:"password" json:"password"`
+	KeyPath  string   `mapstructure:"keyPath" yaml:"keyPath" json:"keyPath"`
 }
 
 type Config struct {
-	Namespace string        `yaml:"namespace" json:"namespace"`
-	Registry  string        `yaml:"registry" json:"registry"`
-	CRISocket string        `yaml:"cri-socket" json:"cri-socket"`
-	Vip       string        `yaml:"vip" json:"vip"`
-	NTP       ntpConfig     `yaml:"ntp" json:"ntp"`
-	NFS       nfsConfig     `yaml:"nfs" json:"nfs"`
-	Nodes     []*nodeConfig `yaml:"nodes" json:"nodes"`
+	Namespace string        `mapstructure:"namespace" yaml:"namespace" json:"namespace"`
+	Registry  string        `mapstructure:"registry" yaml:"registry" json:"registry"`
+	CRISocket string        `mapstructure:"cri-socket" yaml:"cri-socket" json:"cri-socket"`
+	Vip       string        `mapstructure:"vip" yaml:"vip" json:"vip"`
+	NTP       ntpConfig     `mapstructure:"ntp" yaml:"ntp" json:"ntp"`
+	NFS       nfsConfig     `mapstructure:"nfs" yaml:"nfs" json:"nfs"`
+	Nodes     []*nodeConfig `mapstructure:"nodes" yaml:"nodes" json:"nodes"`
 }

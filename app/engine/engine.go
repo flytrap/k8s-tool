@@ -13,7 +13,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const nodeJoinTimeout = 5 * time.Minute
+const (
+	nodeJoinTimeout     = 5 * time.Minute
+	istioInstallTimeout = 10 * time.Minute
+)
 
 type Engine struct {
 	namespace string
@@ -391,12 +394,19 @@ func (e *Engine) installKeepalived() error {
 	return eg.Wait()
 }
 func (e *Engine) startK8s() error {
+	e.logCRISocket()
+	args := []string{e.vip, e.master.GetHostname(), e.master.GetAddress()}
+	if e.CRISocket != "" {
+		args = append(args, e.CRISocket)
+	}
 	res, err := e.master.Run(filepath.Join("resource", "kubeadm"),
-		fmt.Sprintf("bash start.sh %s %s %s", e.vip, e.master.GetHostname(), e.master.GetAddress()))
+		fmt.Sprintf("bash start.sh %s", strings.Join(args, " ")))
 	if err != nil {
 		return err
 	}
-	logrus.Info(res)
+	logrus.Info(string(res))
+
+	certKey := parseCertKey(string(res))
 
 	if err := e.configureKubectl(e.master); err != nil {
 		return err
@@ -408,7 +418,46 @@ func (e *Engine) startK8s() error {
 		return err
 	}
 
-	return e.joinNodes()
+	return e.joinNodes(certKey)
+}
+
+func parseCertKey(output string) string {
+	lines := strings.Split(output, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "certificate-key") || strings.Contains(line, "Using certificate key") {
+			if i+1 < len(lines) {
+				key := strings.TrimSpace(lines[i+1])
+				if len(key) == 64 && isHex(key) {
+					return key
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) uploadCerts() (string, error) {
+	certKeyBytes, err := e.master.Run("", "sudo kubeadm certs certificate-key")
+	if err != nil {
+		return "", err
+	}
+	certKey := strings.TrimSpace(string(certKeyBytes))
+
+	if _, err := e.master.Run(filepath.Join("resource", "kubeadm"), fmt.Sprintf(
+		"sudo kubeadm init phase upload-certs --upload-certs --certificate-key=%s --config=kubeadm-config.yaml",
+		certKey)); err != nil {
+		return "", err
+	}
+	return certKey, nil
 }
 
 func (e *Engine) configureKubectl(n node.Node) error {
@@ -444,43 +493,79 @@ func (e *Engine) waitForNodeRegistered(n node.Node) error {
 	var lastErr error
 
 	for {
-		_, err := e.master.Run("", fmt.Sprintf("kubectl get node %s", shellQuote(hostname)))
-		if err == nil {
+		out, err := e.master.Run("", fmt.Sprintf("kubectl get node %s --ignore-not-found -o name", shellQuote(hostname)))
+		if err == nil && strings.TrimSpace(string(out)) != "" {
 			return nil
 		}
-		lastErr = err
+		if err != nil {
+			lastErr = err
+		}
+		if name, ok := e.nodeNameByInternalIP(n.GetAddress()); ok {
+			return fmt.Errorf("%s: node registered as %q, expected %q; reset the node or join with --node-name",
+				n.GetAddress(), name, hostname)
+		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s: node was not registered in Kubernetes within %s: %w", hostname, nodeJoinTimeout, lastErr)
+			if lastErr != nil {
+				return fmt.Errorf("%s: node was not registered in Kubernetes within %s: %w", hostname, nodeJoinTimeout, lastErr)
+			}
+			return fmt.Errorf("%s: node was not registered in Kubernetes within %s", hostname, nodeJoinTimeout)
 		}
 		time.Sleep(5 * time.Second)
 	}
 }
 
-func (e *Engine) kubeadmJoinCommand(baseJoin string, controlPlane bool, certKey string) string {
+func (e *Engine) nodeNameByInternalIP(addr string) (string, bool) {
+	cmd := fmt.Sprintf(
+		"kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{range .status.addresses[?(@.type==\"InternalIP\")]}{.address}{\"\\n\"}{end}{end}' | awk -v ip=%s '$2 == ip {print $1; exit}'",
+		shellQuote(addr))
+	out, err := e.master.Run("", cmd)
+	if err != nil {
+		return "", false
+	}
+	name := strings.TrimSpace(string(out))
+	return name, name != ""
+}
+
+func (e *Engine) kubeadmJoinCommand(n node.Node, baseJoin string, controlPlane bool, certKey string) string {
 	parts := []string{"sudo", baseJoin}
 	if controlPlane {
 		parts = append(parts, "--control-plane", "--certificate-key", certKey)
 	}
-	criSocket := strings.TrimSpace(e.CRISocket)
-	if criSocket != "" {
-		parts = append(parts, shellQuote("--cri-socket="+criSocket))
+	if hostname := strings.TrimSpace(n.GetHostname()); hostname != "" {
+		parts = append(parts, shellQuote("--node-name="+hostname))
 	}
-	return strings.Join(parts, " ")
+	parts = append(parts, e.criSocketArg())
+	return strings.TrimRight(strings.Join(parts, " "), " ")
+}
+
+func (e *Engine) criSocketArg() string {
+	criSocket := strings.TrimSpace(e.CRISocket)
+	if criSocket == "" {
+		return ""
+	}
+	return shellQuote("--cri-socket=" + criSocket)
+}
+
+func (e *Engine) logCRISocket() {
+	criSocket := strings.TrimSpace(e.CRISocket)
+	if criSocket == "" {
+		logrus.Warn("cri-socket is empty; kubeadm may fail when multiple CRI endpoints exist on a node")
+		return
+	}
+	logrus.Infof("Using CRI socket: %s", criSocket)
 }
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func (e *Engine) joinNodes() error {
-	certKeyBytes, err := e.master.Run("", "sudo kubeadm certs certificate-key")
-	if err != nil {
-		return err
-	}
-	certKey := strings.TrimSpace(string(certKeyBytes))
-
-	if _, err := e.master.Run("", fmt.Sprintf("sudo kubeadm init phase upload-certs --upload-certs --certificate-key=%s", certKey)); err != nil {
-		return err
+func (e *Engine) joinNodes(certKey string) error {
+	if certKey == "" {
+		var err error
+		certKey, err = e.uploadCerts()
+		if err != nil {
+			return err
+		}
 	}
 
 	baseJoinBytes, err := e.master.Run("", "sudo kubeadm token create --print-join-command")
@@ -495,7 +580,8 @@ func (e *Engine) joinNodes() error {
 		if n == e.master || !n.IsNew() || !n.IsControl() {
 			continue
 		}
-		cmd := e.kubeadmJoinCommand(baseJoin, true, certKey)
+		cmd := e.kubeadmJoinCommand(n, baseJoin, true, certKey)
+		logrus.Infof("Joining control-plane node %s with command: %s", n.GetHostname(), maskJoinCommand(cmd))
 		if _, err := n.Run("", cmd); err != nil {
 			return err
 		}
@@ -518,7 +604,8 @@ func (e *Engine) joinNodes() error {
 			continue
 		}
 		eg.Go(func() error {
-			cmd := e.kubeadmJoinCommand(baseJoin, false, "")
+			cmd := e.kubeadmJoinCommand(n, baseJoin, false, "")
+			logrus.Infof("Joining worker node %s with command: %s", n.GetHostname(), maskJoinCommand(cmd))
 			_, err := n.Run("", cmd)
 			return err
 		})
@@ -539,6 +626,25 @@ func (e *Engine) joinNodes() error {
 	return nil
 }
 
+func maskJoinCommand(cmd string) string {
+	fields := strings.Fields(cmd)
+	for i := range fields {
+		if fields[i] == "--token" && i+1 < len(fields) {
+			fields[i+1] = "****"
+		}
+		if strings.HasPrefix(fields[i], "--token=") {
+			fields[i] = "--token=****"
+		}
+		if fields[i] == "--certificate-key" && i+1 < len(fields) {
+			fields[i+1] = "****"
+		}
+		if strings.HasPrefix(fields[i], "--certificate-key=") {
+			fields[i] = "--certificate-key=****"
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
 func (e *Engine) installCalico() error {
 	var eg errgroup.Group
 	for i := range e.nodes {
@@ -554,7 +660,10 @@ func (e *Engine) installCalico() error {
 		return err
 	}
 	_, err := e.master.Run(filepath.Join("resource", "calico"), "kubectl apply -f calico.yaml")
-	return err
+	if err != nil {
+		return err
+	}
+	return e.waitForClusterNetworkReady()
 }
 
 func (e *Engine) installHelm() error {
@@ -587,6 +696,10 @@ func (e *Engine) installNFS() error {
 }
 
 func (e *Engine) installIstio() error {
+	if err := e.waitForClusterNetworkReady(); err != nil {
+		return err
+	}
+
 	var eg errgroup.Group
 	for i := range e.nodes {
 		n := e.nodes[i]
@@ -600,7 +713,129 @@ func (e *Engine) installIstio() error {
 	if err := eg.Wait(); err != nil {
 		return err
 	}
-	return e.master.Install("istio")
+	installErr := e.master.InstallWithTimeout("istio", istioInstallTimeout)
+	if installErr != nil {
+		logrus.Warnf("istio install did not complete cleanly: %v", installErr)
+	}
+	if err := e.ensureIstioReady(installErr != nil); err != nil {
+		if installErr != nil {
+			return fmt.Errorf("istio install failed: %v; recovery check failed: %w", installErr, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func (e *Engine) waitForClusterNetworkReady() error {
+	checks := []struct {
+		name string
+		cmd  string
+	}{
+		{
+			name: "calico-node daemonset",
+			cmd:  "kubectl -n kube-system rollout status daemonset/calico-node --timeout=5m",
+		},
+		{
+			name: "all nodes Ready",
+			cmd:  "kubectl wait --for=condition=Ready nodes --all --timeout=5m",
+		},
+		{
+			name: "CoreDNS deployment",
+			cmd:  "kubectl -n kube-system rollout status deployment/coredns --timeout=5m",
+		},
+	}
+	for _, check := range checks {
+		logrus.Infof("Waiting for %s", check.name)
+		out, err := e.master.Run("", check.cmd)
+		if len(out) > 0 {
+			logrus.Info(string(out))
+		}
+		if err != nil {
+			return fmt.Errorf("%s is not ready: %w", check.name, err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) ensureIstioReady(restartFirst bool) error {
+	if restartFirst {
+		if err := e.restartIstiod(); err != nil {
+			return err
+		}
+	}
+	if err := e.waitForIstiodReady(); err != nil {
+		logrus.Warnf("istiod is not ready, restarting it: %v", err)
+		if restartErr := e.restartIstiod(); restartErr != nil {
+			return restartErr
+		}
+		if err := e.waitForIstiodReady(); err != nil {
+			return err
+		}
+	}
+	if err := e.waitForIstioGatewayReady(); err != nil {
+		logrus.Warnf("istio ingress gateway is not ready, restarting istiod: %v", err)
+		if restartErr := e.restartIstiod(); restartErr != nil {
+			return restartErr
+		}
+		if err := e.waitForIstiodReady(); err != nil {
+			return err
+		}
+		return e.waitForIstioGatewayReady()
+	}
+	return nil
+}
+
+func (e *Engine) restartIstiod() error {
+	logrus.Warn("Restarting istiod deployment")
+	out, err := e.master.Run("", "kubectl -n istio-system rollout restart deployment/istiod")
+	if len(out) > 0 {
+		logrus.Info(string(out))
+	}
+	if err != nil {
+		return fmt.Errorf("restart istiod: %w", err)
+	}
+	return nil
+}
+
+func (e *Engine) waitForIstiodReady() error {
+	if err := e.runAndLog("istiod rollout", "kubectl -n istio-system rollout status deployment/istiod --timeout=5m"); err != nil {
+		return err
+	}
+	return e.waitForIstiodEndpoints()
+}
+
+func (e *Engine) waitForIstiodEndpoints() error {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		out, err := e.master.Run("", "kubectl -n istio-system get endpoints istiod -o jsonpath='{.subsets[*].addresses[*].ip}'")
+		if err == nil && strings.TrimSpace(string(out)) != "" {
+			logrus.Infof("istiod endpoints: %s", strings.TrimSpace(string(out)))
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("wait for istiod endpoints: %w", err)
+			}
+			return errors.New("wait for istiod endpoints: no ready endpoint")
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func (e *Engine) waitForIstioGatewayReady() error {
+	return e.runAndLog("istio ingressgateway rollout", "kubectl -n istio-system rollout status deployment/istio-ingressgateway --timeout=5m")
+}
+
+func (e *Engine) runAndLog(name, cmd string) error {
+	logrus.Infof("Waiting for %s", name)
+	out, err := e.master.Run("", cmd)
+	if len(out) > 0 {
+		logrus.Info(string(out))
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
 }
 
 func (e *Engine) installApp() error {
@@ -659,5 +894,5 @@ func (e *Engine) join() error {
 		return err
 	}
 
-	return e.joinNodes()
+	return e.joinNodes("")
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cheggaaa/pb"
 	"github.com/pkg/sftp"
@@ -44,6 +45,7 @@ type (
 		RemoveHost(name string) error
 		ReplaceHost(addr, name string) error
 		Install(name string, a ...string) error
+		InstallWithTimeout(name string, timeout time.Duration, a ...string) error
 		ReadFile(path string) ([]byte, error)
 		StopService(name string) error
 		StartService(name string) error
@@ -301,6 +303,10 @@ func (n *node) copyDir(srcDir, dstDir string) error {
 }
 
 func (n *node) Run(cwd string, cmds ...string) ([]byte, error) {
+	return n.run(0, cwd, cmds...)
+}
+
+func (n *node) run(timeout time.Duration, cwd string, cmds ...string) ([]byte, error) {
 	cmd := strings.Join(cmds, " && ")
 	if cwd != "" {
 		cmd = fmt.Sprintf("cd %s && %s && cd ~", cwd, cmd)
@@ -315,8 +321,28 @@ func (n *node) Run(cwd string, cmds ...string) ([]byte, error) {
 	var b bytes.Buffer
 	s.Stdout = &b
 	s.Stderr = n.stderr
-	if err := s.Run(cmd); err != nil {
+	if timeout <= 0 {
+		if err := s.Run(cmd); err != nil {
+			return b.Bytes(), err
+		}
+		return b.Bytes(), nil
+	}
+
+	if err := s.Start(cmd); err != nil {
 		return b.Bytes(), err
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Wait()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			return b.Bytes(), err
+		}
+	case <-time.After(timeout):
+		_ = s.Close()
+		return b.Bytes(), fmt.Errorf("command timed out after %s: %s", timeout, cmd)
 	}
 	return b.Bytes(), nil
 }
@@ -334,6 +360,14 @@ func (n *node) StartService(name string) error {
 }
 
 func (n *node) Install(name string, a ...string) error {
+	return n.install(name, 0, a...)
+}
+
+func (n *node) InstallWithTimeout(name string, timeout time.Duration, a ...string) error {
+	return n.install(name, timeout, a...)
+}
+
+func (n *node) install(name string, timeout time.Duration, a ...string) error {
 	srcDir := filepath.Join("resource", name)
 	dstDir := filepath.Join("resource", name)
 
@@ -347,7 +381,7 @@ func (n *node) Install(name string, a ...string) error {
 		return err
 	}
 
-	info, err := n.Run(dstDir,
+	info, err := n.run(timeout, dstDir,
 		"chmod +x install.sh",
 		fmt.Sprintf("bash install.sh %s", strings.Join(a, " ")),
 	)
