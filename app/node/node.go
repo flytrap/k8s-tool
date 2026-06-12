@@ -381,9 +381,13 @@ func (n *node) install(name string, timeout time.Duration, a ...string) error {
 		return err
 	}
 
+	quoted := make([]string, len(a))
+	for i, arg := range a {
+		quoted[i] = shellEscape(arg)
+	}
 	info, err := n.run(timeout, dstDir,
 		"chmod +x install.sh",
-		fmt.Sprintf("bash install.sh %s", strings.Join(a, " ")),
+		fmt.Sprintf("bash install.sh %s", strings.Join(quoted, " ")),
 	)
 	logrus.Info(string(info))
 	return err
