@@ -23,6 +23,13 @@ func Vip(vip string) Option {
 	}
 }
 
+func Region(region string) Option {
+	return func(e *Engine) error {
+		e.region = region
+		return nil
+	}
+}
+
 func NTP(server, allow, timezone string) Option {
 	return func(e *Engine) error {
 		e.ntp.server = server

@@ -63,6 +63,7 @@ type Config struct {
 	Registry  string        `mapstructure:"registry" yaml:"registry" json:"registry"`
 	CRISocket string        `mapstructure:"cri-socket" yaml:"cri-socket" json:"cri-socket"`
 	Vip       string        `mapstructure:"vip" yaml:"vip" json:"vip"`
+	Region    string        `mapstructure:"region" yaml:"region" json:"region"`
 	NTP       ntpConfig     `mapstructure:"ntp" yaml:"ntp" json:"ntp"`
 	NFS       nfsConfig     `mapstructure:"nfs" yaml:"nfs" json:"nfs"`
 	Nodes     []*nodeConfig `mapstructure:"nodes" yaml:"nodes" json:"nodes"`

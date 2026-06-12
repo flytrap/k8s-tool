@@ -72,6 +72,7 @@ func install(ctx *cli.Context) error {
 		engine.CRISocket(c.CRISocket),
 		engine.Registry(c.Registry),
 		engine.Vip(c.Vip),
+		engine.Region(c.Region),
 		engine.NTP(c.NTP.Server, c.NTP.Allow, c.NTP.Timezone),
 		engine.NFS(c.NFS.Server, c.NFS.Path),
 	)

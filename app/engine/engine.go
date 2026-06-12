@@ -22,6 +22,7 @@ type Engine struct {
 	namespace string
 	CRISocket string
 	vip       string
+	region    string
 	ntp       struct {
 		server   string
 		allow    string
@@ -366,14 +367,19 @@ func (e *Engine) installKeepalived() error {
 			masterIps = append(masterIps, n.GetAddress())
 		}
 	}
+	backupIdx := 0
 	for i := range e.nodes {
 		n := e.nodes[i]
 		if !n.IsETCD() {
 			continue
 		}
 		state := "BACKUP"
+		priority := 100
 		if n == e.master {
 			state = "MASTER"
+		} else {
+			backupIdx++
+			priority = 100 - backupIdx*10
 		}
 		var ips = []string{}
 		for _, ip := range masterIps {
@@ -382,7 +388,7 @@ func (e *Engine) installKeepalived() error {
 			}
 		}
 		eg.Go(func() error {
-			if err := n.Install("keepalived", e.vip, state, n.GetAddress(), strings.Join(ips, ",")); err != nil {
+			if err := n.Install("keepalived", e.vip, state, n.GetAddress(), strings.Join(ips, ","), strconv.Itoa(priority), e.region); err != nil {
 				return err
 			}
 			if n != e.master {
