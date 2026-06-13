@@ -43,6 +43,7 @@ ntp:
   timezone: Asia/Shanghai
 
 vip: 192.168.56.151
+region: us-east-1
 
 nodes:
   - address: 192.168.56.101
