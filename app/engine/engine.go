@@ -339,7 +339,7 @@ func (e *Engine) installHa() error {
 	nodes := []string{}
 	for _, n := range e.nodes {
 		if n.IsControl() {
-			nodes = append(nodes, fmt.Sprintf("'server %s %s:6443 check'", n.GetHostname(), n.GetAddress()))
+			nodes = append(nodes, fmt.Sprintf("server %s %s:6443 check", n.GetHostname(), n.GetAddress()))
 		}
 	}
 	var eg errgroup.Group
