@@ -2,19 +2,27 @@ package node
 
 import (
 	"bytes"
+	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"k8s-tool/app/resources"
+
 	"github.com/cheggaaa/pb"
 	"github.com/pkg/sftp"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 const sftpMaxPacket = 1 << 15
@@ -41,6 +49,10 @@ type (
 		SetIsNew(isNew bool)
 		IsNew() bool
 		Connect() error
+		ConnectContext(context.Context) error
+		Close()
+		RunContext(context.Context, string, ...string) ([]byte, error)
+		Stage(string) error
 		AddHost(addr, name string) error
 		RemoveHost(name string) error
 		ReplaceHost(addr, name string) error
@@ -54,17 +66,22 @@ type (
 
 	node struct {
 		base
-		stdout io.Writer
-		stderr io.Writer
-		sshcli *ssh.Client
-		os     string
-		arch   string
-		home   string
+		stdout                                          io.Writer
+		stderr                                          io.Writer
+		sshcli                                          *ssh.Client
+		os                                              string
+		arch                                            string
+		home                                            string
+		ctx                                             context.Context
+		knownHosts, fingerprint                         string
+		insecureSkipHostKeyCheck                        bool
+		connectTimeout, commandTimeout, transferTimeout time.Duration
+		mu                                              sync.Mutex
 	}
 )
 
 func New(opts ...Option) (Node, error) {
-	n := &node{}
+	n := &node{ctx: context.Background(), connectTimeout: 30 * time.Second, commandTimeout: 15 * time.Minute, transferTimeout: 30 * time.Minute}
 	n.addr = "127.0.0.1"
 	n.port = 22
 	n.username = "root"
@@ -76,82 +93,158 @@ func New(opts ...Option) (Node, error) {
 			return nil, err
 		}
 	}
+	if !n.insecureSkipHostKeyCheck {
+		if err := validateHostKeyFingerprint(n.fingerprint); err != nil {
+			return nil, err
+		}
+	}
 	return n, nil
 }
 
-func (n *node) Connect() error {
-	addr := fmt.Sprintf("%s:%d", n.addr, n.port)
+func (n *node) hostKeyCallback() (ssh.HostKeyCallback, error) {
+	if n.insecureSkipHostKeyCheck {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+	if n.fingerprint != "" {
+		return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			if subtle.ConstantTimeCompare([]byte(ssh.FingerprintSHA256(key)), []byte(n.fingerprint)) != 1 {
+				return errors.New("SSH host key fingerprint mismatch")
+			}
+			return nil
+		}, nil
+	}
+	path := n.knownHosts
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		path = filepath.Join(home, ".ssh", "known_hosts")
+	}
+	callback, err := knownhosts.New(path)
+	if err != nil {
+		return nil, fmt.Errorf("load SSH known_hosts %q: %w", path, err)
+	}
+	return callback, nil
+}
+func (n *node) Connect() error { return n.ConnectContext(n.ctx) }
+func (n *node) ConnectContext(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, n.connectTimeout)
+	defer cancel()
+	callback, err := n.hostKeyCallback()
+	if err != nil {
+		return err
+	}
 	auth := []ssh.AuthMethod{ssh.Password(n.password)}
 	if n.keyPath != "" {
 		key, err := os.ReadFile(n.keyPath)
 		if err != nil {
-			return fmt.Errorf("read key file %q: %w", n.keyPath, err)
+			return fmt.Errorf("read private key: %w", err)
 		}
 		signer, err := ssh.ParsePrivateKey(key)
 		if err != nil {
-			return fmt.Errorf("parse private key %q: %w", n.keyPath, err)
+			return fmt.Errorf("parse private key: %w", err)
 		}
 		auth = []ssh.AuthMethod{ssh.PublicKeys(signer)}
 	}
-
-	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            n.username,
-		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	})
+	addr := net.JoinHostPort(n.addr, fmt.Sprint(n.port))
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("SSH connect: %w", err)
 	}
+	// The socket deadline bounds key exchange and authentication as well as dialing.
+	deadline, _ := ctx.Deadline()
+	_ = conn.SetDeadline(deadline)
+	watcherDone := make(chan struct{})
+	stopWatcher := context.AfterFunc(ctx, func() { conn.Close(); close(watcherDone) })
+	cc, chans, reqs, err := ssh.NewClientConn(conn, addr, &ssh.ClientConfig{User: n.username, Auth: auth, HostKeyCallback: callback})
+	if !stopWatcher() {
+		<-watcherDone
+	}
+	if err != nil {
+		conn.Close()
+		if ctx.Err() != nil {
+			return fmt.Errorf("SSH handshake: %w", ctx.Err())
+		}
+		return fmt.Errorf("SSH handshake: %w", err)
+	}
+	if ctx.Err() != nil {
+		conn.Close()
+		return fmt.Errorf("SSH handshake: %w", ctx.Err())
+	}
+	_ = conn.SetDeadline(time.Time{})
+	client := ssh.NewClient(cc, chans, reqs)
+	n.mu.Lock()
+	old := n.sshcli
 	n.sshcli = client
-
-	if err := n.fetchOS(); err != nil {
+	n.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	if err := n.fetchOSContext(parent); err != nil {
+		n.Close()
 		return err
 	}
-	if err := n.fetchArch(); err != nil {
+	if err := n.fetchArchContext(parent); err != nil {
+		n.Close()
 		return err
 	}
-	return n.fetchHome()
+	if err := n.fetchHomeContext(parent); err != nil {
+		n.Close()
+		return err
+	}
+	return nil
 }
-
 func (n *node) Close() {
-	if n.sshcli != nil {
-		n.sshcli.Close()
+	n.mu.Lock()
+	client := n.sshcli
+	n.sshcli = nil
+	n.mu.Unlock()
+	if client != nil {
+		client.Close()
 	}
 }
-
-func (n *node) output(cmds ...string) (string, error) {
-	s, err := n.sshcli.NewSession()
-	if err != nil {
-		return "", err
+func (n *node) client() (*ssh.Client, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.sshcli == nil {
+		return nil, errors.New("SSH connection unavailable; reconnect before retrying")
 	}
-	defer s.Close()
-
-	s.Stderr = n.stderr
-	buf, err := s.Output(strings.Join(cmds, " && "))
-	if err != nil {
-		return "", err
-	}
-	return string(buf), nil
+	return n.sshcli, nil
 }
 
-func (n *node) fetchOS() error {
-	os, err := n.output("cat /etc/os-release | grep -w ID | awk -F '=' '{print $2}'")
+// bounded closes the transport on cancellation, including a blocked channel open.
+// Wait for the operation before accessing its buffers or returning to the caller.
+func (n *node) bounded(ctx context.Context, client *ssh.Client, operation string, fn func() error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		client.Close()
+		<-done
+		return fmt.Errorf("%s: %w (SSH connection closed; reconnect before retrying)", operation, ctx.Err())
+	}
+}
+func (n *node) outputContext(ctx context.Context, cmd string) (string, error) {
+	b, err := n.RunContext(ctx, "", cmd)
+	return string(b), err
+}
+
+func (n *node) fetchOSContext(ctx context.Context) error {
+	os, err := n.outputContext(ctx, "cat /etc/os-release | grep -w ID | awk -F '=' '{print $2}'")
 	if err != nil {
 		return err
 	}
 
 	os = strings.Trim(os, "\"\n")
 	switch os {
-	case "centos", "ubuntu":
+	case "ubuntu", "debian":
 		n.os = os
-	case "kylin":
-		if _, err := n.output("type apt 2>/dev/null"); err == nil {
-			n.os = "ubuntu"
-		} else if _, err := n.output("type yum 2>/dev/null"); err == nil {
-			n.os = "centos"
-		} else {
-			return errors.New("kylin used neither ubuntu nor centos")
-		}
 	default:
 		return fmt.Errorf("unsupported operation system %q", os)
 	}
@@ -159,8 +252,8 @@ func (n *node) fetchOS() error {
 	return nil
 }
 
-func (n *node) fetchArch() error {
-	arch, err := n.output("arch")
+func (n *node) fetchArchContext(ctx context.Context) error {
+	arch, err := n.outputContext(ctx, "arch")
 	if err != nil {
 		return err
 	}
@@ -176,8 +269,8 @@ func (n *node) fetchArch() error {
 	return nil
 }
 
-func (n *node) fetchHome() error {
-	home, err := n.output("echo -n $HOME")
+func (n *node) fetchHomeContext(ctx context.Context) error {
+	home, err := n.outputContext(ctx, "echo -n $HOME")
 	if err != nil {
 		return err
 	}
@@ -187,41 +280,38 @@ func (n *node) fetchHome() error {
 	return nil
 }
 
-func (n *node) AddHost(addr, name string) error {
-	cmd := fmt.Sprintf(
-		"grep -q '%s' /etc/hosts || sudo sed -i '$a %s  %s' /etc/hosts",
-		shellEscape(name), shellEscape(addr), shellEscape(name))
+func (n *node) AddHost(addr, name string) error     { return n.hosts("add", addr, name) }
+func (n *node) RemoveHost(name string) error        { return n.hosts("remove", "", name) }
+func (n *node) ReplaceHost(addr, name string) error { return n.hosts("replace", addr, name) }
+func (n *node) hosts(mode, addr, name string) error {
+	cmd, err := hostsCommand(mode, addr, name)
+	if err != nil {
+		return err
+	}
 	info, err := n.Run("", cmd)
 	logrus.Info(string(info))
 	return err
 }
 
-func (n *node) RemoveHost(name string) error {
-	cmd := fmt.Sprintf("sudo sed -ie '/%s/d' /etc/hosts", shellEscape(name))
-	info, err := n.Run("", cmd)
-	logrus.Info(string(info))
-	return err
-}
-
-func (n *node) ReplaceHost(addr, name string) error {
-	cmd := fmt.Sprintf("sudo sed -ie '/%s/d' /etc/hosts && "+
-		"sudo sed -i '$a %s  %s' /etc/hosts",
-		shellEscape(name), shellEscape(addr), shellEscape(name))
-	info, err := n.Run("", cmd)
-	logrus.Info(string(info))
-	return err
+// Match complete aliases before comments, never substrings or regular expressions.
+func hostsCommand(mode, addr, name string) (string, error) {
+	if err := ValidateHostname(name); err != nil {
+		return "", err
+	}
+	if mode != "remove" && net.ParseIP(addr) == nil {
+		return "", fmt.Errorf("invalid hosts IP address %q", addr)
+	}
+	script := `BEGIN { found=0 } /^[ \t]*#/ { print; next } { line=$0; count=NF; hit=0; for(i=2;i<=count;i++){if($i ~ /^#/)break;if($i==name)hit=1} if(hit)found=1; if(mode=="add" || !hit)print line } END { if(mode=="replace" || (mode=="add" && !found))print addr "  " name }`
+	// Keep the inode and permissions of /etc/hosts (including bind mounts).
+	cmd := "tmpfile=$(mktemp) && awk -v name=" + shellEscape(name) + " -v addr=" + shellEscape(addr) + " -v mode=" + shellEscape(mode) + " " + shellEscape(script) + ` /etc/hosts > "$tmpfile" && sudo sh -c 'cat "$1" > /etc/hosts' sh "$tmpfile"; result=$?; rm -f -- "$tmpfile"; exit "$result"`
+	return cmd, nil
 }
 
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func (n *node) copyFile(srcPath, dstPath string) error {
-	sftp, err := sftp.NewClient(n.sshcli, sftp.MaxPacket(sftpMaxPacket))
-	if err != nil {
-		return err
-	}
-	defer sftp.Close()
+func (n *node) copyFile(sftp *sftp.Client, srcPath, dstPath string) error {
 
 	dstFile, err := sftp.Create(dstPath)
 	if err != nil {
@@ -229,7 +319,7 @@ func (n *node) copyFile(srcPath, dstPath string) error {
 	}
 	defer dstFile.Close()
 
-	srcFile, err := os.Open(srcPath)
+	srcFile, err := resources.Files().Open(srcPath)
 	if err != nil {
 		return err
 	}
@@ -263,38 +353,33 @@ func (n *node) copyFile(srcPath, dstPath string) error {
 	}
 }
 
-func (n *node) copyDir(srcDir, dstDir string) error {
-	sftp, err := sftp.NewClient(n.sshcli, sftp.MaxPacket(sftpMaxPacket))
-	if err != nil {
-		return err
-	}
-	defer sftp.Close()
+func (n *node) copyDir(sftp *sftp.Client, srcDir, dstDir string) error {
 
 	if err := sftp.MkdirAll(dstDir); err != nil {
 		return err
 	}
 
-	list, err := os.ReadDir(srcDir)
+	list, err := fs.ReadDir(resources.Files(), srcDir)
 	if err != nil {
 		return err
 	}
 
 	for _, fi := range list {
 		name := fi.Name()
-		srcPath := filepath.Join(srcDir, name)
+		srcPath := path.Join(srcDir, name)
 		if name == "x86_64" || name == "aarch64" {
 			if name != n.arch {
 				continue
 			}
 			name = ""
 		}
-		dstPath := filepath.Join(dstDir, name)
+		dstPath := path.Join(dstDir, name)
 		if fi.IsDir() {
-			if err := n.copyDir(srcPath, dstPath); err != nil {
+			if err := n.copyDir(sftp, srcPath, dstPath); err != nil {
 				return err
 			}
 		} else {
-			if err := n.copyFile(srcPath, dstPath); err != nil {
+			if err := n.copyFile(sftp, srcPath, dstPath); err != nil {
 				return err
 			}
 		}
@@ -303,58 +388,50 @@ func (n *node) copyDir(srcDir, dstDir string) error {
 }
 
 func (n *node) Run(cwd string, cmds ...string) ([]byte, error) {
-	return n.run(0, cwd, cmds...)
+	return n.RunContext(n.ctx, cwd, cmds...)
 }
-
+func (n *node) RunContext(parent context.Context, cwd string, cmds ...string) ([]byte, error) {
+	return n.runContext(parent, n.commandTimeout, cwd, cmds...)
+}
 func (n *node) run(timeout time.Duration, cwd string, cmds ...string) ([]byte, error) {
-	cmd := strings.Join(cmds, " && ")
-	if cwd != "" {
-		cmd = fmt.Sprintf("cd %s && %s && cd ~", cwd, cmd)
+	if timeout <= 0 {
+		timeout = n.commandTimeout
 	}
-
-	s, err := n.sshcli.NewSession()
+	return n.runContext(n.ctx, timeout, cwd, cmds...)
+}
+func (n *node) runContext(parent context.Context, timeout time.Duration, cwd string, cmds ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	client, err := n.client()
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close()
-
+	cmd := strings.Join(cmds, " && ")
+	if cwd != "" {
+		cmd = "cd -- " + shellEscape(cwd) + " && " + cmd
+	}
 	var b bytes.Buffer
-	s.Stdout = &b
-	s.Stderr = n.stderr
-	if timeout <= 0 {
-		if err := s.Run(cmd); err != nil {
-			return b.Bytes(), err
-		}
-		return b.Bytes(), nil
-	}
-
-	if err := s.Start(cmd); err != nil {
-		return b.Bytes(), err
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- s.Wait()
-	}()
-	select {
-	case err := <-done:
+	err = n.bounded(ctx, client, "SSH command", func() error {
+		s, err := client.NewSession()
 		if err != nil {
-			return b.Bytes(), err
+			return err
 		}
-	case <-time.After(timeout):
-		_ = s.Close()
-		return b.Bytes(), fmt.Errorf("command timed out after %s: %s", timeout, cmd)
-	}
-	return b.Bytes(), nil
+		defer s.Close()
+		s.Stdout = &b
+		s.Stderr = n.stderr
+		return s.Run(cmd)
+	})
+	return b.Bytes(), err
 }
 
 func (n *node) StopService(name string) error {
-	info, err := n.Run("", fmt.Sprintf("sudo systemctl stop %s", name))
+	info, err := n.Run("", fmt.Sprintf("sudo systemctl stop -- %s", shellEscape(name)))
 	logrus.Info(string(info))
 	return err
 }
 
 func (n *node) StartService(name string) error {
-	info, err := n.Run("", fmt.Sprintf("sudo systemctl start %s", name))
+	info, err := n.Run("", fmt.Sprintf("sudo systemctl start -- %s", shellEscape(name)))
 	logrus.Info(string(info))
 	return err
 }
@@ -368,16 +445,11 @@ func (n *node) InstallWithTimeout(name string, timeout time.Duration, a ...strin
 }
 
 func (n *node) install(name string, timeout time.Duration, a ...string) error {
-	srcDir := filepath.Join("resource", name)
-	dstDir := filepath.Join("resource", name)
-
-	path := filepath.Join(srcDir, n.os)
-	if _, err := os.Stat(path); err == nil {
-		srcDir = filepath.Join(srcDir, n.os)
-		dstDir = filepath.Join(dstDir, n.os)
+	if err := n.Stage(name); err != nil {
+		return err
 	}
-
-	if err := n.copyDir(srcDir, dstDir); err != nil {
+	_, dstDir, err := n.componentPaths(name)
+	if err != nil {
 		return err
 	}
 
@@ -394,21 +466,21 @@ func (n *node) install(name string, timeout time.Duration, a ...string) error {
 }
 
 func (n *node) ReadFile(path string) ([]byte, error) {
-	sftp, err := sftp.NewClient(n.sshcli, sftp.MaxPacket(sftpMaxPacket))
-	if err != nil {
-		return nil, err
-	}
-	defer sftp.Close()
+	var result []byte
+	err := n.transfer(func(client *sftp.Client) error { var err error; result, err = n.readFile(client, path); return err })
+	return result, err
+}
+func (n *node) readFile(sftp *sftp.Client, filePath string) ([]byte, error) {
 
-	if !strings.HasPrefix(path, "~") {
-		path = filepath.Join("resource", path)
+	if !strings.HasPrefix(filePath, "~") {
+		filePath = path.Join("resource", filePath)
 	} else {
-		path = strings.Replace(path, "~", n.home, 1)
+		filePath = strings.Replace(filePath, "~", n.home, 1)
 	}
 
-	file, err := sftp.Open(path)
+	file, err := sftp.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("open %q %s", path, err)
+		return nil, fmt.Errorf("open %q %s", filePath, err)
 	}
 	buf, err := io.ReadAll(file)
 	file.Close()
@@ -416,4 +488,47 @@ func (n *node) ReadFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+func (n *node) transfer(fn func(*sftp.Client) error) error {
+	ctx, cancel := context.WithTimeout(n.ctx, n.transferTimeout)
+	defer cancel()
+	client, err := n.client()
+	if err != nil {
+		return err
+	}
+	return n.bounded(ctx, client, "SSH transfer", func() error {
+		s, err := sftp.NewClient(client, sftp.MaxPacket(sftpMaxPacket))
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		return fn(s)
+	})
+}
+func (n *node) componentPaths(name string) (string, string, error) {
+	if name == "." || !fs.ValidPath(name) || strings.Contains(name, "\\") {
+		return "", "", errors.New("invalid component name")
+	}
+	return name, path.Join("resource", name), nil
+}
+
+// Stage uploads the selected component resources, including architecture-specific offline assets.
+func (n *node) Stage(name string) error {
+	src, dst, err := n.componentPaths(name)
+	if err != nil {
+		return err
+	}
+	if _, err := fs.Stat(resources.Files(), src); err != nil {
+		return fmt.Errorf("unknown installation component %q: %w", name, err)
+	}
+	return n.transfer(func(s *sftp.Client) error {
+		if err := s.MkdirAll("resource"); err != nil {
+			return err
+		}
+		if err := n.copyFile(s, "common.sh", "resource/common.sh"); err != nil {
+			return err
+		}
+		return n.copyDir(s, src, dst)
+	})
 }

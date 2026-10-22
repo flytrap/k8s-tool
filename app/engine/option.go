@@ -1,10 +1,39 @@
 package engine
 
+import (
+	"context"
+	"errors"
+)
+
 type Option func(e *Engine) error
+
+func Context(ctx context.Context) Option {
+	return func(e *Engine) error {
+		if ctx == nil {
+			return errors.New("context must not be nil")
+		}
+		e.ctx = ctx
+		return nil
+	}
+}
 
 func Namespace(namespace string) Option {
 	return func(e *Engine) error {
 		e.namespace = namespace
+		return nil
+	}
+}
+
+func KubernetesVersion(version string) Option {
+	return func(e *Engine) error {
+		e.KubernetesVersion = version
+		return nil
+	}
+}
+
+func IstioVersion(version string) Option {
+	return func(e *Engine) error {
+		e.IstioVersion = version
 		return nil
 	}
 }

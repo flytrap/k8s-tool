@@ -1,0 +1,45 @@
+# Example deployment configuration. Replace node addresses and credentials before use.
+namespace: default
+registry: registry.k8s.io
+# Select Kubernetes and Istio releases for this deployment.
+kubernetes-version: v1.37.1
+istio-version: 1.31.2
+cri-socket: unix:///run/containerd/containerd.sock
+
+vip: 192.168.0.151
+# Empty uses a LAN VIP; set an AWS region to enable EC2 private-IP reassignment.
+region: ""
+
+ssh:
+  # false: verify known_hosts or the node's SHA256 fingerprint.
+  # true: skip both checks. An explicit CLI value overrides this setting.
+  insecure-skip-host-key-check: false
+  # Empty uses the current user's ~/.ssh/known_hosts.
+  known-hosts: ""
+  connect-timeout: 30s
+  command-timeout: 15m
+  transfer-timeout: 30m
+
+ntp:
+  # Empty disables Chrony installation.
+  server: ""
+  allow: ""
+  timezone: Asia/Shanghai
+
+nodes:
+  - address: 192.168.0.62
+    hostname: master1
+    role: [etcd, controlplane, worker]
+    port: 22
+    # Example only: both values encode "deploy" using base64.
+    username: dWJ1bnR1
+    password: dWJ1bnR1
+    # A non-empty keyPath selects private-key authentication instead of password.
+    keyPath: ""
+    # Optional alternative to known_hosts: SHA256:<verified server fingerprint>.
+    host-key-fingerprint: ""
+
+nfs:
+  # Empty disables the NFS provisioner; NFS client utilities are still installed.
+  server: ""
+  path: ""

@@ -14,6 +14,9 @@ type Step struct {
 }
 
 func (s *Step) install(e *Engine, n ...int) error {
+	if err := e.ctx.Err(); err != nil {
+		return err
+	}
 	var b strings.Builder
 	for _, v := range n {
 		b.WriteString(strconv.Itoa(v))
@@ -27,7 +30,7 @@ func (s *Step) install(e *Engine, n ...int) error {
 	}
 	if s.run != nil {
 		if err := s.run(e); err != nil {
-			return err
+			return fmt.Errorf("step %d (%s): %w", s.Num, s.Name, err)
 		}
 	}
 
@@ -44,9 +47,9 @@ var DeploySteps = []*Step{
 	{Num: 1, Name: "connect", run: func(e *Engine) error { return e.connect() }},
 	{Num: 2, Name: "init", run: func(e *Engine) error { return e.init() }},
 	{Num: 3, Name: "install chrony", run: func(e *Engine) error { return e.installChrony() }},
-	{Num: 4, Name: "install docker", run: func(e *Engine) error { return e.installDocker() }},
-	{Num: 5, Name: "load docker image", run: func(e *Engine) error { return e.loadDockerImage() }},
-	{Num: 6, Name: "install kubeadm", run: func(e *Engine) error { return e.installKubeadm() }},
+	{Num: 4, Name: "install containerd", run: func(e *Engine) error { return e.installContainerd() }},
+	{Num: 5, Name: "install kubeadm", run: func(e *Engine) error { return e.installKubeadm() }},
+	{Num: 6, Name: "pull Kubernetes images", run: func(e *Engine) error { return e.pullKubernetesImages() }},
 	{Num: 7, Name: "install helm", run: func(e *Engine) error { return e.installHelm() }},
 	{Num: 8, Name: "install haproxy", run: func(e *Engine) error { return e.installHa() }},
 	{Num: 9, Name: "install keepalived", run: func(e *Engine) error { return e.installKeepalived() }},
@@ -63,9 +66,10 @@ var UpdateSteps = []*Step{
 	{Num: 2, Name: "check new", run: func(e *Engine) error { return e.checkNew() }},
 	{Num: 3, Name: "init", run: func(e *Engine) error { return e.init() }},
 	{Num: 4, Name: "install chrony", run: func(e *Engine) error { return e.installChrony() }},
-	{Num: 5, Name: "install docker", run: func(e *Engine) error { return e.installDocker() }},
-	{Num: 6, Name: "load docker image", run: func(e *Engine) error { return e.loadDockerImage() }},
-	{Num: 7, Name: "install kubeadm", run: func(e *Engine) error { return e.installKubeadm() }},
+	{Num: 5, Name: "install containerd", run: func(e *Engine) error { return e.installContainerd() }},
+	{Num: 6, Name: "install kubeadm", run: func(e *Engine) error { return e.installKubeadm() }},
+	{Num: 7, Name: "pull Kubernetes images", run: func(e *Engine) error { return e.pullKubernetesImages() }},
 	{Num: 8, Name: "install nfs", run: func(e *Engine) error { return e.installNFSUtils() }},
 	{Num: 9, Name: "join node", run: func(e *Engine) error { return e.join() }},
+	{Num: 10, Name: "synchronize HA", run: func(e *Engine) error { return e.syncHA() }},
 }
