@@ -11,6 +11,13 @@ platform() {
   case "$(uname -m)" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) fail 'Unsupported architecture';; esac
 }
 apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"; }
+configure_timezone() {
+  local timezone=${1:-}
+  [[ -n $timezone ]] || return 0
+  [[ $timezone =~ ^[a-zA-Z0-9_/+-]+$ && $timezone != *..* && $timezone != /* ]] || fail 'Invalid timezone'
+  timedatectl set-timezone "$timezone"
+  printf '%s\n' "$timezone" > /etc/timezone
+}
 exact_apt_package_version() {
   apt-cache madison "$1" | awk -v version="$2" 'index($3, version "-")==1 && substr($3,length(version)+2) ~ /^[0-9.]+$/ {if (pin == "") pin=$3} END {if (pin != "") print pin}'
 }

@@ -14,6 +14,6 @@ rtcsync
 EOF
 if [[ -n $2 ]]; then printf 'allow %s\nlocal stratum 10\n' "$2" >> "$WORK/chrony.conf"; fi
 install -m 0644 "$WORK/chrony.conf" /etc/chrony/chrony.conf
-timedatectl set-timezone "$3"
+configure_timezone "$3"
 systemctl enable chrony
 systemctl restart chrony

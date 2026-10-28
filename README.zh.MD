@@ -152,6 +152,7 @@ ntp:
   # Empty disables Chrony installation.
   server: ""
   allow: ""
+  # 初始化时应用，同时设置系统时区和 /etc/timezone；为空则保留原时区。
   timezone: Asia/Shanghai
 
 nodes:

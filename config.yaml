@@ -24,6 +24,7 @@ ntp:
   # Empty disables Chrony installation.
   server: ""
   allow: ""
+  # 初始化时应用，同时设置系统时区和 /etc/timezone；为空则保留原时区。
   timezone: Asia/Shanghai
 
 nodes:
@@ -32,8 +33,30 @@ nodes:
     role: [etcd, controlplane, worker]
     port: 22
     # Example only: both values encode "deploy" using base64.
-    username: dWJ1bnR1
-    password: dWJ1bnR1
+    username: bGJqeQ==
+    password: am91cm5leQ==
+    # A non-empty keyPath selects private-key authentication instead of password.
+    keyPath: ""
+    # Optional alternative to known_hosts: SHA256:<verified server fingerprint>.
+    host-key-fingerprint: ""
+  - address: 192.168.0.63
+    hostname: master2
+    role: [etcd, controlplane, worker]
+    port: 22
+    # Example only: both values encode "deploy" using base64.
+    username: bGJqeQ==
+    password: am91cm5leQ==
+    # A non-empty keyPath selects private-key authentication instead of password.
+    keyPath: ""
+    # Optional alternative to known_hosts: SHA256:<verified server fingerprint>.
+    host-key-fingerprint: ""
+  - address: 192.168.0.64
+    hostname: master3
+    role: [etcd, controlplane, worker]
+    port: 22
+    # Example only: both values encode "deploy" using base64.
+    username: bGJqeQ==
+    password: am91cm5leQ==
     # A non-empty keyPath selects private-key authentication instead of password.
     keyPath: ""
     # Optional alternative to known_hosts: SHA256:<verified server fingerprint>.

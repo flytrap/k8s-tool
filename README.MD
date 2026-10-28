@@ -169,6 +169,7 @@ ntp:
   # Empty disables Chrony installation.
   server: ""
   allow: ""
+  # Applied during initialization to the system timezone and /etc/timezone; empty preserves the existing timezone.
   timezone: Asia/Shanghai
 
 nodes:

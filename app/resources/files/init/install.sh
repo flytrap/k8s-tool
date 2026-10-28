@@ -13,7 +13,8 @@ for unit in docker containerd crio; do
   if systemctl is-active --quiet "$unit"; then fail "Existing $unit runtime detected; automatic migration is unsupported"; fi
 done
 apt-get update
-apt_install sudo ca-certificates curl gnupg apt-transport-https iproute2 conntrack socat ethtool util-linux openssl
+apt_install sudo ca-certificates curl gnupg apt-transport-https iproute2 conntrack socat ethtool util-linux openssl tzdata
+configure_timezone "${3:-}"
 if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
   [[ $SUDO_USER =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || fail 'Invalid sudo user'
   workdir

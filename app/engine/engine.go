@@ -74,7 +74,7 @@ func (e *Engine) init() error {
 		eg.Go(func() error {
 			password := n.GetPassword()
 			hostname := n.GetHostname()
-			if err := n.Install("init", password, hostname); err != nil {
+			if err := n.Install("init", password, hostname, e.ntp.timezone); err != nil {
 				return err
 			}
 
